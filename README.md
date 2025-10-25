@@ -1,19 +1,17 @@
+[README.md](https://github.com/user-attachments/files/23144799/README.md)
 
-# Grade Bot (Streamlit)
+# Grade Bot (Student-ID-only)
 
-A lightweight, privacy-conscious Streamlit app that lets students view their grades from your multi‑sheet Excel workbook.
+A streamlined Streamlit app that lets students view grades by **Student ID only** (no access code). Supports multi-sheet Excel workbooks and direct SharePoint/OneDrive links.
 
-## Quick Deploy (Streamlit Cloud)
+## Quick Deploy
 
-1. Create a new **public** GitHub repo and upload these files:
+1. Create a new **public** GitHub repo and upload:
    - `app.py`
    - `requirements.txt`
-2. Go to Streamlit Community Cloud and click **Deploy app**, selecting your repo.
+2. Deploy on Streamlit Community Cloud.
 3. In the app sidebar:
-   - Set an **Access code**.
-   - Either **upload** your `.xlsx` or **paste a cloud link** (SharePoint/OneDrive/Dropbox/GDrive), then click **Fetch from cloud link**.
-
-> For SharePoint/OneDrive, ensure the file is shared as **Anyone with the link can view**, and add `&download=1` to the URL so the app can download the bytes.
+   - Upload `.xlsx` or paste your SharePoint/OneDrive link (set to **Anyone with the link can view** and add `&download=1`).
 
 ## Excel Format
 
@@ -21,14 +19,14 @@ Minimum columns per sheet:
 - `Student ID`, `Course`, `Assessment`, `Score`
 
 Optional columns:
-- `Out Of` (default 100), `Weight %`, `Term`, `First Name`, `Last Name`, `Secret`
+- `Out Of` (default 100), `Weight %`, `Term`, `First Name`, `Last Name`, `Secret` (for optional PIN)
 
-You can add a sheet `_aliases` with two columns `Key`, `Value` to map your custom header names to the canonical names above.
+The app aggregates across sheets. If an `_aliases` sheet exists with `Key`, `Value`, it maps custom headers to the canonical names.
 
-## Student Privacy
-- Protect the app with an **Access code**.
-- Optionally require a per-student `Secret`/PIN column before showing grades.
+## Behavior
+- Students enter **Student ID** (and optional **Secret/PIN** if present).
+- App shows **per-course summary** and a **detailed assessment table**.
+- If Student IDs are unique across the workbook, no course selection is needed.
 
-## Notes
-- The app supports multiple sheets. It stacks them and keeps a `Sheet` column for traceability.
-- If `Weight %` exists for any rows in a course, the app computes a weighted average; otherwise it uses points.
+## Privacy
+- No access code in this variant. If you want an extra layer, add a per-student `Secret`/PIN column to the workbook.
