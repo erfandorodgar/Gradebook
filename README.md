@@ -1,11 +1,20 @@
-[README.md](https://github.com/user-attachments/files/23144799/README.md)
+[README.md](https://github.com/user-attachments/files/23173927/README.md)
 
-# Grade Bot (Student-ID-only)
+# Grade Bot — Login via Credentials Sheet
 
-A streamlined Streamlit app that lets students view grades by **Student ID only** (no access code). Supports multi-sheet Excel workbooks and direct SharePoint/OneDrive links.
+This Streamlit app authenticates students with **Student ID + Access Code** from a credentials sheet,
+then displays grades from other sheets.
 
-## Quick Deploy
+## Workbook Structure
+- A sheet named **`credentials`** or **`login`**, OR the **first** sheet that contains both:
+  - `Student ID`
+  - `Access Code`
+- All other sheets contain grade rows with at least:
+  - `Student ID`, `Course`, `Assessment`, `Score`
+- Optional columns: `Out Of` (default 100), `Weight %`, `Term`, `First Name`, `Last Name`, `Secret`
+- Optional: `_aliases` sheet mapping `Key` -> `Value` to support custom headers.
 
+## Deploy (Streamlit Cloud)
 1. Create a new **public** GitHub repo and upload:
    - `app.py`
    - `requirements.txt`
@@ -13,20 +22,6 @@ A streamlined Streamlit app that lets students view grades by **Student ID only*
 3. In the app sidebar:
    - Upload `.xlsx` or paste your SharePoint/OneDrive link (set to **Anyone with the link can view** and add `&download=1`).
 
-## Excel Format
-
-Minimum columns per sheet:
-- `Student ID`, `Course`, `Assessment`, `Score`
-
-Optional columns:
-- `Out Of` (default 100), `Weight %`, `Term`, `First Name`, `Last Name`, `Secret` (for optional PIN)
-
-The app aggregates across sheets. If an `_aliases` sheet exists with `Key`, `Value`, it maps custom headers to the canonical names.
-
-## Behavior
-- Students enter **Student ID** (and optional **Secret/PIN** if present).
-- App shows **per-course summary** and a **detailed assessment table**.
-- If Student IDs are unique across the workbook, no course selection is needed.
-
-## Privacy
-- No access code in this variant. If you want an extra layer, add a per-student `Secret`/PIN column to the workbook.
+## Student Flow
+1. Enter **Student ID** and **Access Code**.
+2. See **Course summary** and **Assessment details**.
