@@ -1,12 +1,11 @@
 
 """
-Streamlit app: Grade Bot — Student-ID-only version
-Reads a multi-sheet Excel workbook (upload or cloud link) and shows grades by Student ID.
-- No teacher Access Code required.
-- Optional per-student Secret/PIN supported if present in data.
-- If Student IDs are unique across the workbook, we skip course selection and show summaries.
+Streamlit app: Grade Bot — Login via Credentials Sheet (Student ID + Access Code)
+- Expects a credentials sheet with columns: Student ID, Access Code (synonyms supported).
+- Credentials sheet can be named 'credentials' or 'login', OR the first sheet containing both fields will be used.
+- All *other* sheets are treated as grade sheets and stacked.
+- Supports upload OR cloud link (SharePoint/OneDrive/Dropbox/GDrive).
 """
-
 from __future__ import annotations
 import io
 from typing import Dict, List, Optional, Tuple
@@ -15,16 +14,13 @@ import streamlit as st
 import requests
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-st.set_page_config(page_title="NEC Grade Bot (ID only)", page_icon="✅", layout="centered")
+st.set_page_config(page_title="NEC Grade Bot (Login via Access Code)", page_icon="✅", layout="centered")
 st.title("NEC Grade Bot")
-st.caption("Enter your Student ID to view your grades.")
-
-# -----------------------------
-# Utilities
-# -----------------------------
+st.caption("Log in with your Student ID and Access Code to view your grades.")
 
 DEFAULT_SYNONYMS: Dict[str, List[str]] = {
     "student id": ["student id", "id", "sid", "student_number", "student num", "studentno", "student#"],
+    "access code": ["access code", "code", "login code", "passcode", "access_code"],
     "first name": ["first name", "first", "given"],
     "last name": ["last name", "last", "family", "surname"],
     "course": ["course", "class", "section"],
@@ -36,7 +32,7 @@ DEFAULT_SYNONYMS: Dict[str, List[str]] = {
     "secret": ["secret", "pin", "dob_last4"],
 }
 
-STANDARD_COLUMNS = [
+GRADE_STANDARD_COLUMNS = [
     "student id",
     "first name",
     "last name",
@@ -49,15 +45,29 @@ STANDARD_COLUMNS = [
     "secret",
 ]
 
+CRED_REQUIRED = ["student id", "access code"]
+
+def canonical_name(col: str, custom_map: Dict[str, str]) -> Optional[str]:
+    c = str(col).strip().lower()
+    if c in custom_map:
+        return custom_map[c]
+    for standard, syns in DEFAULT_SYNONYMS.items():
+        if c == standard or c in syns:
+            return standard
+    return None
+
+def looks_like_credentials(df: pd.DataFrame, custom_map: Dict[str, str]) -> bool:
+    mapped = set()
+    for c in df.columns:
+        cn = canonical_name(c, custom_map)
+        if cn:
+            mapped.add(cn)
+    return all(req in mapped for req in CRED_REQUIRED)
+
 @st.cache_data(show_spinner=False)
-def read_workbook(file_bytes: bytes) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Read all sheets, normalize columns via synonyms and optional _aliases sheet, and stack into a long DataFrame.
-    Returns (df, sheet_names_read)
-    """
+def parse_workbook(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, List[str], str]:
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
 
-    # Optional alias sheet: two columns Key, Value (case-insensitive)
     custom_map: Dict[str, str] = {}
     if any(name.strip().lower() == "_aliases" for name in xl.sheet_names):
         ali = pd.read_excel(io.BytesIO(file_bytes), sheet_name="_aliases")
@@ -65,61 +75,82 @@ def read_workbook(file_bytes: bytes) -> Tuple[pd.DataFrame, List[str]]:
             for _, row in ali.iterrows():
                 k = str(row["key"]).strip().lower()
                 v = str(row["value"]).strip().lower()
-                custom_map[v] = k  # map sheet header v to canonical key k
+                custom_map[v] = k
 
-    def canonical(col: str) -> Optional[str]:
-        c = str(col).strip().lower()
-        # apply custom aliasing first
-        if c in custom_map:
-            return custom_map[c]
-        for standard, syns in DEFAULT_SYNONYMS.items():
-            if c == standard or c in syns:
-                return standard
-        return None
+    creds_name = None
+    for name in xl.sheet_names:
+        low = name.strip().lower()
+        if low in {"credentials", "login"}:
+            creds_name = name
+            break
+    if creds_name is None:
+        for name in xl.sheet_names:
+            if name.strip().lower() == "_aliases":
+                continue
+            df_try = pd.read_excel(io.BytesIO(file_bytes), sheet_name=name)
+            if looks_like_credentials(df_try, custom_map):
+                creds_name = name
+                break
 
-    frames: List[pd.DataFrame] = []
-    read_names: List[str] = []
+    creds_df = pd.DataFrame(columns=["student id", "access code"])
+    grade_frames: List[pd.DataFrame] = []
+    used_grade_sheets: List[str] = []
 
     for name in xl.sheet_names:
-        if name.strip().lower() in {"_aliases"}:
+        low = name.strip().lower()
+        if low == "_aliases":
             continue
         df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=name)
-        # Map columns
+
         colmap = {}
         for c in df.columns:
-            can = canonical(c)
+            can = canonical_name(c, custom_map)
             if can:
                 colmap[c] = can
         df = df.rename(columns=colmap)
-        # Keep only recognized columns, add missing ones as NaN
-        for col in STANDARD_COLUMNS:
-            if col not in df.columns:
-                df[col] = pd.NA
-        # Drop rows without Student ID
-        df = df.dropna(subset=["student id"]).copy()
-        # Standardize types
-        df["student id"] = df["student id"].astype(str).str.strip()
-        for c in ["first name", "last name", "course", "term", "assessment", "secret"]:
-            df[c] = df[c].astype(str).str.strip()
-        # Numeric fields
-        for c in ["score", "out of", "weight"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        # Defaults
-        df.loc[df["out of"].isna(), "out of"] = 100
-        # Attach sheet info
-        df["_sheet"] = name
-        frames.append(df[STANDARD_COLUMNS + ["_sheet"]])
-        read_names.append(name)
 
-    if not frames:
-        return pd.DataFrame(columns=STANDARD_COLUMNS + ["_sheet"]), []
+        if creds_name and name == creds_name:
+            tmp = df.copy()
+            for req in CRED_REQUIRED:
+                if req not in tmp.columns:
+                    tmp[req] = pd.NA
+            tmp = tmp[CRED_REQUIRED].dropna(subset=["student id"]).copy()
+            tmp["student id"] = tmp["student id"].astype(str).str.strip()
+            tmp["access code"] = tmp["access code"].astype(str).str.strip()
+            creds_df = tmp
+        else:
+            for col in GRADE_STANDARD_COLUMNS:
+                if col not in df.columns:
+                    df[col] = pd.NA
+            df = df.dropna(subset=["student id"]).copy()
+            df["student id"] = df["student id"].astype(str).str.strip()
+            for c in ["first name", "last name", "course", "term", "assessment", "secret"]:
+                df[c] = df[c].astype(str).str.strip()
+            for c in ["score", "out of", "weight"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df.loc[df["out of"].isna(), "out of"] = 100
+            df["_sheet"] = name
+            used_grade_sheets.append(name)
+            grade_frames.append(df[GRADE_STANDARD_COLUMNS + ["_sheet"]])
 
-    all_df = pd.concat(frames, ignore_index=True)
-    return all_df, read_names
+    grades_df = pd.concat(grade_frames, ignore_index=True) if grade_frames else pd.DataFrame(columns=GRADE_STANDARD_COLUMNS + ["_sheet"])
+    return grades_df, creds_df, used_grade_sheets, creds_name or "(auto-detected/none)"
 
+def _coerce_download_url(u: str) -> str:
+    try:
+        pr = urlparse(u)
+        q = parse_qs(pr.query)
+        if pr.netloc.endswith("sharepoint.com") or pr.netloc.endswith("1drv.ms"):
+            if "download" not in q:
+                q["download"] = ["1"]
+        if pr.netloc.endswith("dropbox.com"):
+            q["dl"] = ["1"]
+        new_query = urlencode({k: v[0] for k, v in q.items()})
+        return urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, new_query, pr.fragment))
+    except Exception:
+        return u
 
 def compute_course_total(q: pd.DataFrame) -> float:
-    """Compute one course overall percent for a subset q (single course)."""
     if q.empty:
         return float("nan")
     if q["weight"].notna().any():
@@ -132,9 +163,7 @@ def compute_course_total(q: pd.DataFrame) -> float:
     denom = q["out of"].fillna(100).sum()
     return (q["score"].fillna(0).sum() / denom) * 100 if denom else float("nan")
 
-
 def summarize_by_course(rows: pd.DataFrame) -> pd.DataFrame:
-    """Return per-course summary with overall percent."""
     out = []
     for course, sub in rows.groupby(rows["course"].fillna("")).groups.items():
         part = rows.loc[sub]
@@ -145,43 +174,29 @@ def summarize_by_course(rows: pd.DataFrame) -> pd.DataFrame:
     df = pd.DataFrame(out).sort_values("Course").reset_index(drop=True)
     return df
 
-
-def _coerce_download_url(u: str) -> str:
-    try:
-        pr = urlparse(u)
-        q = parse_qs(pr.query)
-        # SharePoint/OneDrive: add download=1 if missing
-        if pr.netloc.endswith("sharepoint.com") or pr.netloc.endswith("1drv.ms"):
-            if "download" not in q:
-                q["download"] = ["1"]
-        # Dropbox: dl=1 for direct bytes
-        if pr.netloc.endswith("dropbox.com"):
-            q["dl"] = ["1"]
-        new_query = urlencode({k: v[0] for k, v in q.items()})
-        return urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, new_query, pr.fragment))
-    except Exception:
-        return u
-
-# -----------------------------
-# Sidebar: Teacher setup
-# -----------------------------
 st.sidebar.header("Teacher setup")
-st.sidebar.write("Upload your Excel gradebook OR paste a cloud link. No access code needed in this version.")
-workbook = st.sidebar.file_uploader("Upload .xlsx gradebook", type=["xlsx"])  # kept in session
-
+st.sidebar.write("Upload your Excel OR paste a cloud link. The app finds a credentials sheet (Student ID + Access Code) and uses other sheets for grades.")
+workbook = st.sidebar.file_uploader("Upload .xlsx gradebook", type=["xlsx"])
 cloud_url = st.sidebar.text_input("Or paste a cloud link to .xlsx (OneDrive/SharePoint/Dropbox/GDrive)")
 fetch_btn = st.sidebar.button("Fetch from cloud link")
 
 if "grade_df" not in st.session_state:
     st.session_state["grade_df"] = None
+    st.session_state["creds_df"] = None
+    st.session_state["creds_sheet_name"] = None
+
+def _load_bytes(file_bytes: bytes):
+    grades, creds, grade_sheets, creds_name = parse_workbook(file_bytes)
+    st.session_state["grade_df"] = grades
+    st.session_state["creds_df"] = creds
+    st.session_state["creds_sheet_name"] = creds_name
+    st.sidebar.success(f"Loaded {len(grades):,} grade rows from {len(grade_sheets)} sheet(s). Credentials sheet: {creds_name}")
+    if grade_sheets:
+        st.sidebar.caption("Grade sheets: " + ", ".join(grade_sheets))
 
 if workbook is not None:
     try:
-        df_all, used_sheets = read_workbook(workbook.getvalue())
-        st.sidebar.success(f"Loaded {len(df_all):,} rows from {len(used_sheets)} sheet(s).")
-        if used_sheets:
-            st.sidebar.caption("Sheets: " + ", ".join(used_sheets))
-        st.session_state["grade_df"] = df_all
+        _load_bytes(workbook.getvalue())
     except Exception as e:
         st.sidebar.error(f"Problem reading workbook: {e}")
 
@@ -193,61 +208,58 @@ if fetch_btn and cloud_url:
         if r.status_code != 200:
             st.sidebar.error(f"Could not download file (HTTP {r.status_code}). If this is SharePoint/OneDrive, set link permissions to 'Anyone with the link' and try again. Also try adding &download=1 to the link.")
         else:
-            df_all, used_sheets = read_workbook(r.content)
-            st.sidebar.success(f"Loaded {len(df_all):,} rows from {len(used_sheets)} sheet(s) via cloud link.")
-            if used_sheets:
-                st.sidebar.caption("Sheets: " + ", ".join(used_sheets))
-            st.session_state["grade_df"] = df_all
+            _load_bytes(r.content)
     except Exception as e:
         st.sidebar.error(f"Problem fetching workbook: {e}")
 
-# -----------------------------
-# Student view
-# -----------------------------
-st.subheader("Student portal")
-
-col1, col2 = st.columns([2,1])
+st.subheader("Student login")
+col1, col2 = st.columns([1,1])
 with col1:
     sid = st.text_input("Student ID", help="Enter your Student ID exactly as provided by your instructor.")
 with col2:
-    secret = st.text_input("Optional PIN / Secret (if your teacher gave you one)", type="password")
+    code = st.text_input("Access Code", type="password", help="Use the Access Code from your teacher.")
 
-show = st.button("Show my grades")
+show = st.button("Log in and show my grades")
 
 if show:
-    df = st.session_state.get("grade_df")
-    if df is None:
-        st.error("The gradebook is not loaded yet. Ask your instructor to upload or connect the workbook.")
+    grades = st.session_state.get("grade_df")
+    creds = st.session_state.get("creds_df")
+
+    if grades is None or creds is None or creds.empty:
+        st.error("Workbook not loaded or credentials sheet missing. Ensure a sheet named 'credentials'/'login' exists, or the first sheet contains 'Student ID' and 'Access Code'.")
     else:
-        sid_rows = df[df["student id"].astype(str).str.lower() == str(sid).strip().lower()]
-        if secret:
-            sid_rows = sid_rows[(sid_rows["secret"].astype(str).str.strip() == secret.strip()) | (sid_rows["secret"].isna())]
+        sid_norm = str(sid).strip().lower()
+        code_norm = str(code).strip()
+        creds_cmp = creds.copy()
+        creds_cmp["student id"] = creds_cmp["student id"].astype(str).str.strip().str.lower()
+        creds_cmp["access code"] = creds_cmp["access code"].astype(str).str.strip()
 
-        if sid_rows.empty:
-            st.warning("No records found. Check your Student ID and optional secret.")
+        match = creds_cmp[(creds_cmp["student id"] == sid_norm) & (creds_cmp["access code"] == code_norm)]
+        if match.empty:
+            st.warning("Invalid Student ID or Access Code.")
         else:
-            # Per-course summary
-            summary = summarize_by_course(sid_rows)
-            if not summary.empty:
-                st.markdown("### Course summary")
-                st.dataframe(summary, use_container_width=True)
-            # Detailed assessments
-            st.markdown("### Assessment details")
-            details = sid_rows.copy()
-            details["Percent"] = (details["score"].fillna(0) / details["out of"].replace(0, pd.NA).fillna(100)) * 100
-            details = details[[
-                "course", "term", "assessment", "score", "out of", "Percent", "weight", "_sheet"
-            ]].rename(columns={
-                "course": "Course",
-                "term": "Term",
-                "assessment": "Assessment",
-                "score": "Score",
-                "out of": "Out of",
-                "weight": "Weight %",
-                "_sheet": "Sheet"
-            })
-            st.dataframe(details.sort_values(["Course", "Assessment"]), use_container_width=True)
-            st.caption("If any assessment is missing or looks off, please contact your instructor.")
+            rows = grades[grades["student id"].astype(str).str.strip().str.lower() == sid_norm]
+            if rows.empty:
+                st.info("Login OK, but no grade rows were found for this Student ID.")
+            else:
+                summary = summarize_by_course(rows)
+                if not summary.empty:
+                    st.markdown("### Course summary")
+                    st.dataframe(summary, use_container_width=True)
 
-st.divider()
-st.caption("Made with ♥ for instructors and students. © 2025")
+                st.markdown("### Assessment details")
+                details = rows.copy()
+                details["Percent"] = (details["score"].fillna(0) / details["out of"].replace(0, pd.NA).fillna(100)) * 100
+                details = details[[
+                    "course", "term", "assessment", "score", "out of", "Percent", "weight", "_sheet"
+                ]].rename(columns={
+                    "course": "Course",
+                    "term": "Term",
+                    "assessment": "Assessment",
+                    "score": "Score",
+                    "out of": "Out of",
+                    "weight": "Weight %",
+                    "_sheet": "Sheet"
+                })
+                st.dataframe(details.sort_values(["Course", "Assessment"]), use_container_width=True)
+                st.caption("If any assessment is missing or looks off, please contact your instructor.")
